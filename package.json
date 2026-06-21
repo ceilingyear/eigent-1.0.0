@@ -14,6 +14,7 @@
   "type": "module",
   "scripts": {
     "prepare": "husky",
+    "dev:local": "powershell -ExecutionPolicy Bypass -File scripts/start-local-dev.ps1",
     "clean-cache": "rimraf node_modules/.vite",
     "dev": "npm run clean-cache && vite",
     "dev:web": "npm run clean-cache && vite --config vite.config.web.ts",
