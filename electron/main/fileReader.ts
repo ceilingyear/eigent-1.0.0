@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { BrowserWindow, app } from 'electron';
 import fs from 'fs';
@@ -466,8 +466,29 @@ export class FileReader {
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const fileName =
-      path.basename(originalPath) || `temp_${Date.now()}.${type}`;
+    const extension = type ? `.${type.replace(/^\./, '')}` : '';
+    let fileName = '';
+
+    try {
+      const url = new URL(originalPath);
+      const streamedPath = url.searchParams.get('path');
+      fileName = path.basename(streamedPath || url.pathname);
+    } catch {
+      fileName = path.basename(originalPath);
+    }
+
+    fileName = decodeURIComponent(fileName || '')
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!fileName) {
+      fileName = `temp_${Date.now()}${extension}`;
+    } else if (extension && !path.extname(fileName)) {
+      fileName = `${fileName}${extension}`;
+    }
+
+    fileName = `${Date.now()}_${fileName}`;
     return path.join(tempDir, fileName);
   }
 

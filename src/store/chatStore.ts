@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import {
   fetchDelete,
@@ -544,6 +544,7 @@ export interface StartTaskOptions {
   preserveTaskId?: boolean;
   skipHistoryCreate?: boolean;
   historyId?: string | number | null;
+  autoConfirmPlan?: boolean;
 }
 
 export interface ChatStore {
@@ -2155,52 +2156,54 @@ const chatStore = (initial?: Partial<ChatStore>) =>
                 console.warn('Error clearing auto-confirm timer:', error);
               }
 
-              // 30 seconds auto confirm
-              try {
-                setAutoConfirmDeadline(
-                  currentTaskId,
-                  Date.now() + AUTO_CONFIRM_TIMEOUT_MS
-                );
-                autoConfirmTimers[currentTaskId] = setTimeout(() => {
-                  try {
-                    const currentStore = getCurrentChatStore();
-                    const currentId = getCurrentTaskId();
-                    const {
-                      tasks,
-                      handleConfirmTask,
-                      setPlanDirty,
-                      setAutoConfirmDeadline,
-                    } = currentStore;
-                    const message = tasks[currentId].messages.findLast(
-                      (item) => item.step === AgentStep.TO_SUB_TASKS
-                    );
-                    const isConfirm = message?.isConfirm || false;
-                    const isTakeControl = tasks[currentId].isTakeControl;
+              if (!startOptions.autoConfirmPlan) {
+                // 30 seconds auto confirm
+                try {
+                  setAutoConfirmDeadline(
+                    currentTaskId,
+                    Date.now() + AUTO_CONFIRM_TIMEOUT_MS
+                  );
+                  autoConfirmTimers[currentTaskId] = setTimeout(() => {
+                    try {
+                      const currentStore = getCurrentChatStore();
+                      const currentId = getCurrentTaskId();
+                      const {
+                        tasks,
+                        handleConfirmTask,
+                        setPlanDirty,
+                        setAutoConfirmDeadline,
+                      } = currentStore;
+                      const message = tasks[currentId].messages.findLast(
+                        (item) => item.step === AgentStep.TO_SUB_TASKS
+                      );
+                      const isConfirm = message?.isConfirm || false;
+                      const isTakeControl = tasks[currentId].isTakeControl;
 
-                    if (
-                      project_id &&
-                      !isConfirm &&
-                      !isTakeControl &&
-                      !tasks[currentId].planDirty
-                    ) {
-                      handleConfirmTask(project_id, currentId, type);
+                      if (
+                        project_id &&
+                        !isConfirm &&
+                        !isTakeControl &&
+                        !tasks[currentId].planDirty
+                      ) {
+                        handleConfirmTask(project_id, currentId, type);
+                      }
+                      setPlanDirty(currentId, false);
+                      setAutoConfirmDeadline(currentId, null);
+                      delete autoConfirmTimers[currentId];
+                    } catch (error) {
+                      console.error(
+                        'Error in auto-confirm timeout handler:',
+                        error
+                      );
+                      // Clean up the timer reference even if there's an error
+                      setAutoConfirmDeadline(currentTaskId, null);
+                      delete autoConfirmTimers[currentTaskId];
                     }
-                    setPlanDirty(currentId, false);
-                    setAutoConfirmDeadline(currentId, null);
-                    delete autoConfirmTimers[currentId];
-                  } catch (error) {
-                    console.error(
-                      'Error in auto-confirm timeout handler:',
-                      error
-                    );
-                    // Clean up the timer reference even if there's an error
-                    setAutoConfirmDeadline(currentTaskId, null);
-                    delete autoConfirmTimers[currentTaskId];
-                  }
-                }, AUTO_CONFIRM_TIMEOUT_MS);
-              } catch (error) {
-                console.error('Error setting auto-confirm timer:', error);
-                setAutoConfirmDeadline(currentTaskId, null);
+                  }, AUTO_CONFIRM_TIMEOUT_MS);
+                } catch (error) {
+                  console.error('Error setting auto-confirm timer:', error);
+                  setAutoConfirmDeadline(currentTaskId, null);
+                }
               }
 
               const newNoticeMessage: Message = {
@@ -2210,7 +2213,9 @@ const chatStore = (initial?: Partial<ChatStore>) =>
                 step: AgentStep.NOTICE_CARD,
               };
               addMessages(currentTaskId, newNoticeMessage);
-              const shouldAutoConfirm = !!type && !isMultiTurnAfterCompletion;
+              const shouldAutoConfirm =
+                (!!type || startOptions.autoConfirmPlan) &&
+                !isMultiTurnAfterCompletion;
 
               const newMessage: Message = {
                 id: generateUniqueId(),
@@ -2267,6 +2272,23 @@ const chatStore = (initial?: Partial<ChatStore>) =>
               currentTaskId,
               agentMessages.data.sub_tasks as TaskInfo[]
             );
+            if (
+              startOptions.autoConfirmPlan &&
+              project_id &&
+              !isMultiTurnAfterCompletion
+            ) {
+              setTimeout(() => {
+                try {
+                  const latestState = getCurrentChatStore();
+                  const latestTaskId = getCurrentTaskId();
+                  const latestTask = latestState.tasks[latestTaskId];
+                  if (!latestTask || latestTask.isTakeControl) return;
+                  latestState.handleConfirmTask(project_id, latestTaskId, type);
+                } catch (error) {
+                  console.error('Error auto-confirming plan:', error);
+                }
+              }, 0);
+            }
             return;
           }
           // Create agent
@@ -3452,6 +3474,7 @@ const chatStore = (initial?: Partial<ChatStore>) =>
               }
             }
 
+            let historyUpdatePromise: Promise<unknown> | null = null;
             if (!type && historyId) {
               try {
                 const st = tasks[currentTaskId].summaryTask || '';
@@ -3474,7 +3497,10 @@ const chatStore = (initial?: Partial<ChatStore>) =>
                   tokens: getTokens(currentTaskId),
                 };
                 syncProjectDisplayName(project_id, projectName);
-                proxyFetchPut(`/api/v1/chat/history/${historyId}`, obj);
+                historyUpdatePromise = proxyFetchPut(
+                  `/api/v1/chat/history/${historyId}`,
+                  obj
+                );
               } catch (e) {
                 console.warn('History update failed on END:', e);
               }
@@ -3594,6 +3620,24 @@ const chatStore = (initial?: Partial<ChatStore>) =>
               ExecutionStatus.Completed,
               getTokens(currentTaskId)
             );
+
+            if (!type && outputProjectId) {
+              void (async () => {
+                if (historyUpdatePromise) {
+                  await historyUpdatePromise.catch((error) =>
+                    console.warn('History update failed on END:', error)
+                  );
+                }
+                await projectStore.persistProjectFinalStateSnapshot(
+                  outputProjectId
+                );
+              })().catch((error) =>
+                console.warn(
+                  '[chatStore] Failed to persist final state snapshot:',
+                  error
+                )
+              );
+            }
 
             return;
           }

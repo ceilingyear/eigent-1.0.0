@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { generateUniqueId } from '@/lib';
 import { proxyUpdateTriggerExecution } from '@/service/triggerApi';
@@ -20,19 +20,22 @@ import {
 } from '@/store/chatStore';
 import { useProjectRuntimeStore } from '@/store/projectRuntimeStore';
 import { useTriggerTaskStore } from '@/store/triggerTaskStore';
-import { ExecutionStatus } from '@/types';
+import { ExecutionStatus, TriggerType } from '@/types';
 import { AgentStep, ChatTaskStatus } from '@/types/constants';
 import { useCallback, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 
 /** Poll interval in ms */
 const POLL_INTERVAL_MS = 2000;
+/** Reset queued trigger tasks that were marked processing but never started. */
+const STALE_PROCESSING_TIMEOUT_MS = 60 * 1000;
 
 interface ActiveBackgroundTask {
   projectId: string;
   chatTaskId: string;
   executionId: string;
   triggerTaskId?: string;
+  startedAt: number;
 }
 
 /**
@@ -64,7 +67,9 @@ export function useBackgroundTaskProcessor() {
         triggerTaskId?: string;
         triggerId?: number;
         triggerName?: string;
+        triggerType?: string;
         timestamp: number;
+        processingStartedAt?: number;
       } | null = null;
 
       for (const project of projects) {
@@ -150,10 +155,24 @@ export function useBackgroundTaskProcessor() {
           continue;
         }
 
-        const msg = projectData.queuedMessages.find(
-          (m) => m.executionId && !m.processing
-        );
+        const now = Date.now();
+        const msg = projectData.queuedMessages.find((m) => {
+          if (!m.executionId) return false;
+          if (!m.processing) return true;
+          return (
+            !!m.processingStartedAt &&
+            now - m.processingStartedAt > STALE_PROCESSING_TIMEOUT_MS
+          );
+        });
         if (msg && msg.executionId) {
+          if (msg.processing) {
+            console.warn(
+              '[BackgroundTaskProcessor] Reclaiming stale queued trigger task:',
+              msg.task_id,
+              'executionId:',
+              msg.executionId
+            );
+          }
           messageToProcess = {
             projectId: project.id,
             task_id: msg.task_id,
@@ -163,7 +182,9 @@ export function useBackgroundTaskProcessor() {
             triggerTaskId: msg.triggerTaskId,
             triggerId: msg.triggerId,
             triggerName: msg.triggerName,
+            triggerType: msg.triggerType,
             timestamp: msg.timestamp,
+            processingStartedAt: msg.processingStartedAt,
           };
           break;
         }
@@ -180,6 +201,7 @@ export function useBackgroundTaskProcessor() {
         triggerTaskId,
         triggerId,
         triggerName,
+        triggerType,
       } = messageToProcess;
 
       const newTaskId = generateUniqueId();
@@ -193,6 +215,7 @@ export function useBackgroundTaskProcessor() {
         chatTaskId: newTaskId,
         executionId,
         triggerTaskId,
+        startedAt: Date.now(),
       });
 
       projectStore.markQueuedMessageAsProcessing(projectId, task_id);
@@ -244,7 +267,9 @@ export function useBackgroundTaskProcessor() {
             content,
             attaches,
             executionId,
-            projectId
+            projectId,
+            undefined,
+            { autoConfirmPlan: triggerType === TriggerType.Schedule }
           )
           .then(() => {
             console.log(
@@ -329,12 +354,19 @@ export function useBackgroundTaskProcessor() {
 
     activeTasksRef.current.forEach((task, executionId) => {
       const project = projectStore.getProjectById(task.projectId);
-      if (!project?.chatStores) return;
+      if (!project?.chatStores) {
+        if (Date.now() - task.startedAt > STALE_PROCESSING_TIMEOUT_MS) {
+          toRemove.push(executionId);
+        }
+        return;
+      }
 
+      let foundTask = false;
       for (const chatStore of Object.values(project.chatStores)) {
         const state = chatStore.getState();
         const t = state.tasks[task.chatTaskId];
         if (t) {
+          foundTask = true;
           if (
             t.status !== ChatTaskStatus.RUNNING &&
             t.status !== ChatTaskStatus.PAUSE
@@ -343,6 +375,13 @@ export function useBackgroundTaskProcessor() {
           }
           break;
         }
+      }
+
+      if (
+        !foundTask &&
+        Date.now() - task.startedAt > STALE_PROCESSING_TIMEOUT_MS
+      ) {
+        toRemove.push(executionId);
       }
     });
 

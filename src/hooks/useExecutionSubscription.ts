@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { queryClient, queryKeys } from '@/lib/queryClient';
 import { proxyFetchTriggerConfig } from '@/service/triggerApi';
@@ -18,7 +18,7 @@ import { ActivityType, useActivityLogStore } from '@/store/activityLogStore';
 import { useAuthStore } from '@/store/authStore';
 import { useTriggerStore } from '@/store/triggerStore';
 import { ExecutionStatus, ExecutionType, TriggerType } from '@/types';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 // Ping interval: send ping every 2 minutes
@@ -36,6 +36,7 @@ interface ExecutionCreatedMessage {
   input_data: any;
   user_id: number;
   project_id: string;
+  space_id?: string | null;
   timestamp: string;
   task_prompt?: string;
 }
@@ -113,6 +114,7 @@ type WebSocketMessage =
  */
 export function useExecutionSubscription(enabled: boolean = true) {
   const wsRef = useRef<WebSocket | null>(null);
+  const connectRef = useRef<() => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const sessionIdRef = useRef<string>(crypto.randomUUID());
@@ -124,6 +126,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
   const maxReconnectAttempts = 5;
   const debounceDelay = 5000; // 5 seconds debounce period
   const baseReconnectDelay = 1000;
+  const [isConnected, setIsConnected] = useState(false);
 
   const { token } = useAuthStore();
   const { addLog } = useActivityLogStore();
@@ -211,6 +214,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
         !!token
       );
       setWsConnectionStatusRef.current('disconnected');
+      setIsConnected(false);
       return;
     }
 
@@ -266,6 +270,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
                 `[ExecutionSubscription] Connected with session: ${message.session_id}`
               );
               setWsConnectionStatusRef.current('connected');
+              setIsConnected(true);
               // toast.success('Connected to execution listener');
               break;
 
@@ -313,6 +318,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
                 // New fields for programmatic task execution
                 triggerType: message.trigger_type,
                 projectId: message.project_id, // Future: triggers will be associated with projects
+                spaceId: message.space_id || null,
                 inputData: message.input_data || {},
               });
               break;
@@ -399,6 +405,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
                 pongTimeoutRef.current = null;
               }
               setWsConnectionStatusRef.current('connected');
+              setIsConnected(true);
               break;
 
             case 'pong':
@@ -409,6 +416,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
               }
               setLastPongTimestampRef.current(Date.now());
               setWsConnectionStatusRef.current('connected');
+              setIsConnected(true);
               break;
 
             case 'error':
@@ -435,6 +443,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
       ws.onerror = (error) => {
         console.error('[ExecutionSubscription] WebSocket error:', error);
         setWsConnectionStatusRef.current('unhealthy');
+        setIsConnected(false);
       };
 
       ws.onclose = (event) => {
@@ -446,6 +455,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
         wsRef.current = null;
         stopPingInterval();
         setWsConnectionStatusRef.current('disconnected');
+        setIsConnected(false);
 
         // Don't reconnect on authentication failures
         if (
@@ -493,7 +503,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
 
               reconnectTimeoutRef.current = setTimeout(() => {
                 reconnectAttemptsRef.current++;
-                connect();
+                connectRef.current();
               }, delay);
             } else {
               console.error(
@@ -510,8 +520,13 @@ export function useExecutionSubscription(enabled: boolean = true) {
         error
       );
       setWsConnectionStatusRef.current('disconnected');
+      setIsConnected(false);
     }
   }, [enabled, token, startPingInterval, stopPingInterval]); // Only depend on enabled and token - primitives that rarely change
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -534,6 +549,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
 
     reconnectAttemptsRef.current = 0; // Reset reconnect attempts
     setWsConnectionStatusRef.current('disconnected');
+    setIsConnected(false);
   }, [stopPingInterval]);
 
   useEffect(() => {
@@ -577,7 +593,7 @@ export function useExecutionSubscription(enabled: boolean = true) {
   }, [manualReconnect, setWsReconnectCallback]);
 
   return {
-    isConnected: wsRef.current?.readyState === WebSocket.OPEN,
+    isConnected,
     disconnect,
     reconnect: manualReconnect,
   };

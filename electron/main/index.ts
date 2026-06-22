@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import axios from 'axios';
 import {
@@ -78,6 +78,11 @@ const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 const VITE_PUBLIC = VITE_DEV_SERVER_URL
   ? path.join(MAIN_DIST, 'public')
   : RENDERER_DIST;
+const APP_ICON = path.join(
+  MAIN_DIST,
+  'build',
+  process.platform === 'linux' ? 'icon.png' : 'icon.ico'
+);
 
 // ==================== global variables ====================
 let win: BrowserWindow | null = null;
@@ -2226,7 +2231,7 @@ async function createWindow() {
     // macOS-specific title bar styling
     titleBarStyle: isMac ? 'hidden' : undefined,
     trafficLightPosition: isMac ? { x: 10, y: 12 } : undefined,
-    icon: path.join(VITE_PUBLIC, 'favicon.ico'),
+    icon: APP_ICON,
     // Rounded corners on macOS and Linux (as original)
     roundedCorners: !isWindows,
     // Windows-specific options

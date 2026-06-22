@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,9 +10,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { proxyFetchGet } from '@/api/http';
+import { proxyUpdateTriggerExecution } from '@/service/triggerApi';
 import {
   ProjectType,
   useProjectRuntimeStore,
@@ -23,6 +24,7 @@ import {
   TriggeredTask,
   formatTriggeredTaskMessage,
 } from '@/store/triggerTaskStore';
+import { ExecutionStatus } from '@/types';
 import { useCallback, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 
@@ -191,18 +193,57 @@ export function useTriggerTaskExecutor() {
         // Format the message with all context
         const formattedMessage = formatTriggeredTaskMessage(task);
 
-        // Add message directly to projectStore's queuedMessages
-        // useBackgroundTaskProcessor will pick it up and execute it
-        const queuedTaskId = store.addQueuedMessage(
-          targetProjectId,
-          formattedMessage,
-          [],
-          undefined,
-          task.executionId,
-          undefined,
-          task.triggerId,
-          task.triggerName
-        );
+        if (!store.getProjectById(targetProjectId)) {
+          console.warn(
+            '[TriggerTaskExecutor] Target project still missing before queueing, creating runtime shell:',
+            targetProjectId
+          );
+          store.createProject(
+            `Trigger: ${task.triggerName}`,
+            `Auto-created project for ${task.triggerType} trigger execution`,
+            targetProjectId,
+            undefined,
+            undefined,
+            false,
+            { spaceId: task.spaceId || activeSpaceId || undefined }
+          );
+        }
+
+        const queueMessage = () =>
+          store.addQueuedMessage(
+            targetProjectId,
+            formattedMessage,
+            [],
+            undefined,
+            task.executionId,
+            undefined,
+            task.triggerId,
+            task.triggerName,
+            task.triggerType
+          );
+
+        // Add message directly to projectStore's queuedMessages.
+        // useBackgroundTaskProcessor will pick it up and execute it.
+        let queuedTaskId = queueMessage();
+
+        if (!queuedTaskId) {
+          console.warn(
+            '[TriggerTaskExecutor] Queueing failed, recreating target runtime project and retrying:',
+            targetProjectId
+          );
+          if (!store.getProjectById(targetProjectId)) {
+            store.createProject(
+              `Trigger: ${task.triggerName}`,
+              `Auto-created project for ${task.triggerType} trigger execution`,
+              targetProjectId,
+              undefined,
+              undefined,
+              false,
+              { spaceId: task.spaceId || activeSpaceId || undefined }
+            );
+          }
+          queuedTaskId = queueMessage();
+        }
 
         if (!queuedTaskId) {
           throw new Error('Failed to add message to project queue');
@@ -220,6 +261,23 @@ export function useTriggerTaskExecutor() {
         );
       } catch (error: any) {
         console.error('[TriggerTaskExecutor] Task queueing failed:', error);
+        proxyUpdateTriggerExecution(
+          task.executionId,
+          {
+            status: ExecutionStatus.Failed,
+            error_message: error?.message || 'Task queueing failed',
+          },
+          {
+            projectId: task.projectId || undefined,
+            triggerId: task.triggerId,
+            triggerName: task.triggerName,
+          }
+        ).catch((updateError) =>
+          console.warn(
+            '[TriggerTaskExecutor] Failed to report queueing failure:',
+            updateError
+          )
+        );
         toast.error(`Trigger failed: ${task.triggerName}`, {
           description: error?.message || 'Unknown error',
         });

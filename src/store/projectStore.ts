@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { proxyFetchGet } from '@/api/http';
 import { generateUniqueId } from '@/lib';
@@ -109,6 +109,24 @@ const polishCompletedHistoryTask = (
   );
 };
 
+const serializeTaskForProjectCache = (
+  taskId: string,
+  taskState: unknown
+): CachedTask | null => {
+  try {
+    // Task state contains FileInfo entries with React component references in
+    // `icon` and File objects in `attaches`. Neither survives IDB's structured
+    // clone, so round-trip through JSON to strip volatile fields.
+    return { taskState: JSON.parse(JSON.stringify(taskState)) };
+  } catch (serializeError) {
+    console.warn(
+      `[ProjectStore] Failed to serialize task ${taskId} for cache:`,
+      serializeError
+    );
+    return null;
+  }
+};
+
 export enum ProjectType {
   NORMAL = 'normal',
   REPLAY = 'replay',
@@ -131,7 +149,9 @@ interface TaskQueue {
   triggerTaskId?: string;
   triggerId?: number;
   triggerName?: string;
+  triggerType?: string;
   processing?: boolean;
+  processingStartedAt?: number;
 }
 
 interface ProjectMetadata {
@@ -360,6 +380,10 @@ interface ProjectStore {
     taskQuestionsById?: Record<string, string>,
     serverUpdatedAt?: number | null
   ) => Promise<string>;
+  persistProjectFinalStateSnapshot: (
+    projectId: string,
+    serverUpdatedAt?: number | null
+  ) => Promise<boolean>;
   setProjectNavLead: (
     projectId: string,
     lead: SessionNavLeadPresentation
@@ -378,7 +402,8 @@ interface ProjectStore {
     executionId?: string,
     triggerTaskId?: string,
     triggerId?: number,
-    triggerName?: string
+    triggerName?: string,
+    triggerType?: string
   ) => string | null;
   removeQueuedMessage: (projectId: string, taskId: string) => TaskQueue;
   restoreQueuedMessage: (projectId: string, messageData: TaskQueue) => void;
@@ -1475,76 +1500,69 @@ const projectStore = create<ProjectStore>()((set, get) => ({
           `[ProjectStore] Completed loading project ${loadProjectId}`
         );
 
-        // Persist the freshly-reconstructed state so the next session can
-        // skip the SSE replay entirely. Best-effort — IDB failures (quota,
-        // private mode) are logged inside the wrapper and never block.
-        //
-        // Skip the write when:
-        // 1. `cacheScope` is null — caller had no userId, no serverUpdatedAt,
-        //    or both. We cannot anchor a freshness check, so writing would
-        //    create un-evictable entries.
-        // 2. The user logged out (or switched accounts) during the replay.
-        //    cacheScope.userId was captured at function start; if it no
-        //    longer matches the live session, writing would leak this
-        //    user's data.
-        // 3. Any task failed to replay. Persisting a partial project would
-        //    cache the missing-task state as "final" — the next open would
-        //    hit the cache and never retry the failed task.
-        const liveUserId = getAuthStore().user_id;
         const allTasksLoaded = taskIds.every((taskId) =>
           loadedChatStoresByTaskId.has(taskId)
         );
-        if (
-          cacheScope &&
-          liveUserId === cacheScope.userId &&
-          allTasksLoaded &&
-          loadedChatStoresByTaskId.size > 0
-        ) {
-          const tasksSnapshot: Record<string, CachedTask> = {};
-          const cachedTaskIds: string[] = [];
-          let snapshotComplete = true;
-          for (const taskId of taskIds) {
-            const chatStore = loadedChatStoresByTaskId.get(taskId);
-            const taskState = chatStore?.getState().tasks[taskId];
-            if (!taskState) {
-              snapshotComplete = false;
-              break;
-            }
-            // Task state contains FileInfo entries with React component
-            // references in `icon` (LucideIcon etc) and File objects in
-            // `attaches`. Neither survives IDB's structured clone, so
-            // round-trip through JSON to strip them. Functions, symbols,
-            // and undefined fields are dropped by JSON; we lose nothing
-            // that hydrateTask cares about (the volatile fields it
-            // already zeroes out cover the small set of stripped values).
-            let serializable: unknown;
-            try {
-              serializable = JSON.parse(JSON.stringify(taskState));
-            } catch (serializeError) {
-              console.warn(
-                `[ProjectStore] Failed to serialize task ${taskId} for cache:`,
-                serializeError
-              );
-              snapshotComplete = false;
-              break;
-            }
-            tasksSnapshot[taskId] = { taskState: serializable };
-            cachedTaskIds.push(taskId);
-          }
-          if (snapshotComplete && cachedTaskIds.length === taskIds.length) {
-            void putCachedProject(cacheScope, {
-              serverUpdatedAt: serverUpdatedAt as number,
-              taskIds: cachedTaskIds,
-              tasks: tasksSnapshot,
-              projectName: displayName,
-            }).catch(() => undefined);
-          }
+        if (allTasksLoaded && loadedChatStoresByTaskId.size > 0) {
+          void get()
+            .persistProjectFinalStateSnapshot(loadProjectId, serverUpdatedAt)
+            .catch(() => undefined);
         }
       }
     } finally {
       get().setHistoryLoadingProject(loadProjectId, false);
     }
     return loadProjectId;
+  },
+
+  persistProjectFinalStateSnapshot: async (
+    projectId: string,
+    serverUpdatedAt?: number | null
+  ) => {
+    const cacheUserId = getAuthStore().user_id;
+    const liveProject = get().projects[projectId];
+    if (cacheUserId == null || !liveProject) return false;
+
+    const tasksSnapshot: Record<string, CachedTask> = {};
+    const cachedTaskIds: string[] = [];
+    const chatEntries = Object.entries(liveProject.chatStores || {}).sort(
+      ([chatIdA], [chatIdB]) =>
+        (liveProject.chatStoreTimestamps?.[chatIdA] ?? liveProject.createdAt) -
+        (liveProject.chatStoreTimestamps?.[chatIdB] ?? liveProject.createdAt)
+    );
+
+    for (const [, chatStore] of chatEntries) {
+      const state = chatStore.getState();
+      const taskIds = Object.keys(state.tasks);
+      for (const taskId of taskIds) {
+        const taskState = state.tasks[taskId];
+        if (!taskState) continue;
+        if (
+          taskState.isPending ||
+          taskState.status === ChatTaskStatus.RUNNING ||
+          taskState.status === ChatTaskStatus.PAUSE
+        ) {
+          return false;
+        }
+        const serializedTask = serializeTaskForProjectCache(taskId, taskState);
+        if (!serializedTask) return false;
+        tasksSnapshot[taskId] = serializedTask;
+        cachedTaskIds.push(taskId);
+      }
+    }
+
+    if (cachedTaskIds.length === 0) return false;
+
+    await putCachedProject(
+      { userId: cacheUserId, projectId },
+      {
+        serverUpdatedAt: serverUpdatedAt ?? Date.now(),
+        taskIds: cachedTaskIds,
+        tasks: tasksSnapshot,
+        projectName: liveProject.name,
+      }
+    );
+    return true;
   },
 
   saveChatStore: (
@@ -1642,7 +1660,8 @@ const projectStore = create<ProjectStore>()((set, get) => ({
     executionId?: string,
     triggerTaskId?: string,
     triggerId?: number,
-    triggerName?: string
+    triggerName?: string,
+    triggerType?: string
   ) => {
     const { projects } = get();
 
@@ -1684,6 +1703,7 @@ const projectStore = create<ProjectStore>()((set, get) => ({
               triggerTaskId,
               triggerId,
               triggerName,
+              triggerType,
             },
           ],
           updatedAt: Date.now(),
@@ -1823,7 +1843,9 @@ const projectStore = create<ProjectStore>()((set, get) => ({
         [projectId]: {
           ...state.projects[projectId],
           queuedMessages: state.projects[projectId].queuedMessages.map((m) =>
-            m.task_id === taskId ? { ...m, processing: true } : m
+            m.task_id === taskId
+              ? { ...m, processing: true, processingStartedAt: Date.now() }
+              : m
           ),
           updatedAt: Date.now(),
         },

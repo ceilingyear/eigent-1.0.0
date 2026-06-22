@@ -1,4 +1,4 @@
-# ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import asyncio
 import datetime
@@ -113,6 +113,15 @@ def normalize_summary_task(
         SUMMARY_TASK_SUMMARY_MAX_LENGTH,
     )
     return f"{name or 'Task'}|{summary or name or 'Task'}"
+
+
+def build_fast_summary_task(task: Task) -> str:
+    """Build the plan card summary without a second model call."""
+    content = " ".join((getattr(task, "content", "") or "").split())
+    if not content:
+        content = "Task"
+    first_line = content.splitlines()[0] if content else "Task"
+    return normalize_summary_task(f"{first_line}|{content}", content)
 
 
 def _extract_stream_chunk_content(chunk: Any) -> str:
@@ -933,41 +942,10 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             except Exception:
                                 pass
 
-                            # Generate task summary
-                            summary_task_agent = task_summary_agent(options)
-                            try:
-                                summary_task_content = await asyncio.wait_for(
-                                    summary_task(
-                                        summary_task_agent, camel_task
-                                    ),
-                                    timeout=10,
-                                )
-                                task_lock.summary_generated = True
-                            except TimeoutError:
-                                logger.warning(
-                                    "summary_task timeout",
-                                    extra={
-                                        "project_id": options.project_id,
-                                        "task_id": options.task_id,
-                                    },
-                                )
-                                task_lock.summary_generated = True
-                                content_preview = getattr(
-                                    camel_task, "content", ""
-                                )
-                                summary_task_content = normalize_summary_task(
-                                    f"Task|{content_preview}",
-                                    content_preview,
-                                )
-                            except Exception:
-                                task_lock.summary_generated = True
-                                content_preview = getattr(
-                                    camel_task, "content", ""
-                                )
-                                summary_task_content = normalize_summary_task(
-                                    f"Task|{content_preview}",
-                                    content_preview,
-                                )
+                            summary_task_content = build_fast_summary_task(
+                                camel_task
+                            )
+                            task_lock.summary_generated = True
 
                             state_holder["summary_task"] = summary_task_content
                             try:
@@ -1608,48 +1586,9 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             f"{n} subtasks"
                         )
 
-                        # Generate proper LLM summary
-                        # for multi-turn tasks instead
-                        # of hardcoded fallback
-                        try:
-                            multi_turn_summary_agent = task_summary_agent(
-                                options
-                            )
-                            new_summary_content = await asyncio.wait_for(
-                                summary_task(
-                                    multi_turn_summary_agent, camel_task
-                                ),
-                                timeout=10,
-                            )
-                            logger.info(
-                                "Generated LLM summary for multi-turn task",
-                                extra={"project_id": options.project_id},
-                            )
-                        except TimeoutError:
-                            logger.warning(
-                                "Multi-turn summary_task timeout",
-                                extra={
-                                    "project_id": options.project_id,
-                                    "task_id": task_id,
-                                },
-                            )
-                            # Fallback to descriptive but not generic summary
-                            task_content_for_summary = new_task_content
-                            new_summary_content = normalize_summary_task(
-                                f"Follow-up Task|{task_content_for_summary}",
-                                task_content_for_summary,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                "Error generating multi-turn "
-                                f"task summary: {e}"
-                            )
-                            # Fallback to descriptive but not generic summary
-                            task_content_for_summary = new_task_content
-                            new_summary_content = normalize_summary_task(
-                                f"Follow-up Task|{task_content_for_summary}",
-                                task_content_for_summary,
-                            )
+                        new_summary_content = build_fast_summary_task(
+                            camel_task
+                        )
 
                         # Emit final subtasks once when
                         # decomposition is complete

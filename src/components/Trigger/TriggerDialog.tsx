@@ -1,4 +1,4 @@
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// ========= Copyright 2025-2026 @ ATAI All Rights Reserved. =========
+// ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import larkIcon from '@/assets/icon/lark.png';
 import slackIcon from '@/assets/icon/slack.svg';
@@ -150,8 +150,17 @@ export const TriggerDialog: React.FC<TriggerDialogProps> = ({
   const { projectStore } = useChatStoreAdapter();
   const activeSpaceId = useSpaceStore((state) => state.activeSpaceId);
   const activeProjectId = projectStore.activeProjectId;
+  const targetProjectId = useSpaceStore((state) => {
+    if (activeProjectId) return activeProjectId;
+    if (selectedTrigger?.project_id) return selectedTrigger.project_id;
+    const lastVisitedProjectId = activeSpaceId
+      ? state.lastVisitedProjectBySpace[activeSpaceId]
+      : null;
+    if (lastVisitedProjectId) return lastVisitedProjectId;
+    return state.getProjectsForSpace(activeSpaceId)[0]?.id ?? null;
+  });
   const activeProjectMeta = useSpaceStore((state) =>
-    activeProjectId ? state.getProjectMeta(activeProjectId) : null
+    targetProjectId ? state.getProjectMeta(targetProjectId) : null
   );
 
   // Fetch trigger config using query hook - only fetch when we have a valid app selected
@@ -283,15 +292,20 @@ export const TriggerDialog: React.FC<TriggerDialogProps> = ({
       return;
     }
 
-    setIsLoading(true);
-    onTriggerCreating?.(formData);
-
     try {
       //Make sure we have an active project
-      if (!projectStore.activeProjectId) {
+      if (!targetProjectId) {
         toast.error(t('triggers.project-id-required'));
         return;
       }
+
+      setIsLoading(true);
+      const triggerDraft = {
+        ...formData,
+        space_id: activeProjectMeta?.spaceId || activeSpaceId || undefined,
+        project_id: targetProjectId,
+      };
+      onTriggerCreating?.(triggerDraft);
 
       let response: Trigger;
 
@@ -332,7 +346,7 @@ export const TriggerDialog: React.FC<TriggerDialogProps> = ({
         addLog({
           type: ActivityType.TriggerUpdated,
           message: `Trigger "${response.name}" updated`,
-          projectId: activeProjectId || undefined,
+          projectId: targetProjectId,
           triggerId: response.id,
           triggerName: response.name,
         });
@@ -352,7 +366,7 @@ export const TriggerDialog: React.FC<TriggerDialogProps> = ({
           task_prompt: formData.task_prompt,
           max_executions_per_hour: formData.max_executions_per_hour,
           max_executions_per_day: formData.max_executions_per_day,
-          project_id: activeProjectId || undefined,
+          project_id: targetProjectId,
         };
 
         // Include config based on trigger type
@@ -381,7 +395,7 @@ export const TriggerDialog: React.FC<TriggerDialogProps> = ({
         addLog({
           type: ActivityType.TriggerCreated,
           message: `Trigger "${response.name}" created`,
-          projectId: activeProjectId || undefined,
+          projectId: targetProjectId,
           triggerId: response.id,
           triggerName: response.name,
         });
